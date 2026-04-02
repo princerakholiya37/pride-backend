@@ -161,6 +161,8 @@ router.post("/signup", async (req, res) => {
         role,
         vehicle_type: role === "driver" ? vehicle_type : null,
         vehicle_number: role === "driver" ? vehicle_number : null,
+        is_online: false,
+        last_online_at: null,
         is_verified: true,
       },
     ]);
@@ -232,6 +234,165 @@ router.post("/login", async (req, res) => {
       success: false,
       message: "Login failed",
     });
+  }
+});
+
+const generateOtp = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+// Ride request routes have been moved to ./ride.js using only the users table.
+// Keep auth-related routes below.
+
+router.post("/forgot-password", async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.json({ success: false, message: "Email required" });
+  }
+
+  try {
+    // check user exists in supabase
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("email", email)
+      .single();
+
+    if (error || !user) {
+      return res.json({ success: false, message: "User not found" });
+    }
+
+    // generate OTP
+    const otp = generateOtp();
+
+    otpStore[email] = {
+      otp,
+      expiresAt: Date.now() + 5 * 60 * 1000, // 5 min
+    };
+
+    // send email
+    await transporter.sendMail({
+      from: `"PRide" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "Reset Password OTP",
+      html: `<h2>Your OTP is: ${otp}</h2><p>Valid for 5 minutes</p>`,
+    });
+
+    res.json({ success: true, message: "OTP sent to email" });
+
+  } catch (err) {
+    console.log(err);
+    res.json({ success: false, message: "Server error" });
+  }
+});
+
+router.post("/reset-password", async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+
+  try {
+    const record = otpStore[email];
+
+    if (!record) {
+      return res.json({ success: false, message: "OTP not found" });
+    }
+
+    if (record.otp !== otp) {
+      return res.json({ success: false, message: "Invalid OTP" });
+    }
+
+    if (Date.now() > record.expiresAt) {
+      return res.json({ success: false, message: "OTP expired" });
+    }
+
+    // update password in supabase
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    const { error } = await supabase
+      .from("users")
+      .update({ password: hashedPassword })
+      .eq("email", email);
+
+    if (error) {
+      return res.json({ success: false, message: "Update failed" });
+    }
+
+    // remove OTP
+    delete otpStore[email];
+
+    res.json({ success: true, message: "Password updated successfully" });
+
+  } catch (err) {
+    console.log(err);
+    res.json({ success: false, message: "Server error" });
+  }
+});
+
+router.get("/profile", async (req, res) => {
+  const { email, role } = req.query;
+
+  if (!email) {
+    return res.json({ success: false, message: "Email required" });
+  }
+
+  try {
+    let query = supabase
+      .from("users")
+      .select("id,name,email,mobile,role,vehicle_type,vehicle_number,is_online,is_verified")
+      .eq("email", email);
+
+    if (role) {
+      query = query.eq("role", role);
+    }
+
+    const { data: user, error } = await query.single();
+
+    if (error || !user) {
+      return res.json({ success: false, message: "User not found" });
+    }
+
+    return res.json({ success: true, user });
+  } catch (err) {
+    console.log(err);
+    return res.json({ success: false, message: "Server error" });
+  }
+});
+
+router.post("/driver-status", async (req, res) => {
+  const { email, is_online } = req.body;
+
+  if (!email || typeof is_online !== "boolean") {
+    return res.json({ success: false, message: "Email and online status are required" });
+  }
+
+  try {
+    const { data: driver, error: driverError } = await supabase
+      .from("users")
+      .select("id,role")
+      .eq("email", email)
+      .single();
+
+    if (driverError || !driver || driver.role !== "driver") {
+      return res.json({ success: false, message: "Driver not found" });
+    }
+
+    const updateData = { is_online };
+    if (is_online) {
+      updateData.last_online_at = new Date().toISOString();
+    }
+
+    const { error } = await supabase
+      .from("users")
+      .update(updateData)
+      .eq("email", email);
+
+    if (error) {
+      return res.json({ success: false, message: "Unable to update driver status" });
+    }
+
+    return res.json({ success: true, message: "Driver status updated", is_online });
+  } catch (err) {
+    console.log(err);
+    return res.json({ success: false, message: "Server error" });
   }
 });
 
