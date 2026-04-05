@@ -8,89 +8,170 @@ const crypto = require("crypto");
 dotenv.config();
 
 const router = express.Router();
-
-// OTP STORE
 const otpStore = {};
+const signupVerificationStore = {};
 
-// SEND OTP
-router.post("/send-otp", async (req, res) => {
-  const { email } = req.body;
+const normalizeEmail = (email = "") => email.trim().toLowerCase();
 
-  if (!email) {
-    return res.json({ success: false, message: "Email required" });
+const isValidEmail = (email = "") =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+const generateOtp = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+router.get("/profile", async (req, res) => {
+  const normalizedEmail = normalizeEmail(req.query.email);
+
+  if (!normalizedEmail) {
+    return res.status(400).json({
+      success: false,
+      message: "Email is required.",
+    });
   }
 
-  const otp = Math.floor(100000 + Math.random() * 900000);
-
-  otpStore[email] = {
-    otp,
-    expires: Date.now() + 5 * 60 * 1000,
-  };
-
   try {
-    await transporter.sendMail({
-      from: `"PRide" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "PRide OTP Verification",
-      html: `<h2>Your OTP is: ${otp}</h2>`,
-    });
+    const { data: user, error } = await supabase
+      .from("users")
+      .select(
+        "id, name, email, mobile, role, address, city, state, postal_code",
+      )
+      .eq("email", normalizedEmail)
+      .single();
 
-    res.json({ success: true, message: "OTP sent" });
-  } catch (err) {
-    res.json({ success: false, message: "Email send failed" });
+    if (error || !user) {
+      return res.status(404).json({
+        success: false,
+        message: "User profile not found.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      user,
+    });
+  } catch (error) {
+    console.log("PROFILE FETCH ERROR:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to load profile right now.",
+    });
   }
 });
 
-// VERIFY OTP + SIGNUP
+router.patch("/profile", async (req, res) => {
+  const normalizedEmail = normalizeEmail(req.body.email);
+  const name = String(req.body.name || "").trim();
+  const mobile = String(req.body.mobile || "").trim();
+  const address = String(req.body.address || "").trim();
+  const city = String(req.body.city || "").trim();
+  const state = String(req.body.state || "").trim();
+  const postalCode = String(req.body.postalCode || "").trim();
 
-router.post("/verify-signup", async (req, res) => {
-  const { email, otp } = req.body;
-
-  const record = otpStore[email];
-
-  if (!record) {
-    return res.json({ success: false, message: "OTP not found" });
+  if (!normalizedEmail || !name || !mobile) {
+    return res.status(400).json({
+      success: false,
+      message: "Name, email, and mobile are required.",
+    });
   }
 
-  if (Date.now() > record.expires) {
-    return res.json({ success: false, message: "OTP expired" });
+  const mobileRegex = /^[6-9]\d{9}$/;
+
+  if (!mobileRegex.test(mobile)) {
+    return res.status(400).json({
+      success: false,
+      message: "Enter valid 10-digit mobile number starting with 6-9",
+    });
   }
 
-  if (record.otp != otp) {
-    return res.json({ success: false, message: "Invalid OTP" });
+  try {
+    const { data: currentUser, error: currentUserError } = await supabase
+      .from("users")
+      .select("id, email")
+      .eq("email", normalizedEmail)
+      .single();
+
+    if (currentUserError || !currentUser) {
+      return res.status(404).json({
+        success: false,
+        message: "User profile not found.",
+      });
+    }
+
+    const { data: existingMobile } = await supabase
+      .from("users")
+      .select("id")
+      .eq("mobile", mobile)
+      .neq("email", normalizedEmail)
+      .maybeSingle();
+
+    if (existingMobile) {
+      return res.status(400).json({
+        success: false,
+        message: "Mobile already registered with another account.",
+      });
+    }
+
+    const { data: updatedUser, error: updateError } = await supabase
+      .from("users")
+      .update({
+        name,
+        mobile,
+        address,
+        city,
+        state,
+        postal_code: postalCode,
+      })
+      .eq("email", normalizedEmail)
+      .select(
+        "id, name, email, mobile, role, address, city, state, postal_code",
+      )
+      .single();
+
+    if (updateError) {
+      return res.status(500).json({
+        success: false,
+        message: updateError.message || "Unable to update profile.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Profile updated successfully.",
+      user: updatedUser,
+    });
+  } catch (error) {
+    console.log("PROFILE UPDATE ERROR:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to update profile right now.",
+    });
   }
-
-  delete otpStore[email];
-
-  return res.json({
-    success: true,
-    message: "Email verified successfully",
-  });
 });
 
 router.post("/signup", async (req, res) => {
-  const {
-    name,
-    email,
-    password,
-    mobile,
-    role,
-    vehicle_type,
-    vehicle_number,
-  } = req.body;
+  const { name, email, password, mobile } = req.body;
 
-  // VALIDATION
-  if (!name || !email || !password) {
+  const normalizedEmail = normalizeEmail(email);
+
+  if (!name || !normalizedEmail || !password) {
     return res.json({
       success: false,
       message: "All required fields must be filled",
     });
   }
 
-  if (!password || password.length < 6) {
+  if (password.length < 6) {
     return res.json({
       success: false,
       message: "Password must be at least 6 characters",
+    });
+  }
+
+  if (!isValidEmail(normalizedEmail)) {
+    return res.json({
+      success: false,
+      message: "Enter a valid email address",
     });
   }
 
@@ -110,21 +191,23 @@ router.post("/signup", async (req, res) => {
     });
   }
 
-  if (role === "driver" && (!vehicle_type || !vehicle_number)) {
+  const signupVerification = signupVerificationStore[normalizedEmail];
+
+  if (!signupVerification || Date.now() > signupVerification.expiresAt) {
+    delete signupVerificationStore[normalizedEmail];
     return res.json({
       success: false,
-      message: "Driver details required",
+      message: "Please verify your email with OTP before signup",
     });
   }
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // email check
     const { data: existingEmail } = await supabase
       .from("users")
       .select("email")
-      .eq("email", email)
+      .eq("email", normalizedEmail)
       .single();
 
     if (existingEmail) {
@@ -134,35 +217,27 @@ router.post("/signup", async (req, res) => {
       });
     }
 
-    // mobile check
-    if (mobile) {
-      const { data: existingMobile } = await supabase
-        .from("users")
-        .select("mobile")
-        .eq("mobile", mobile)
-        .single();
+    const { data: existingMobile } = await supabase
+      .from("users")
+      .select("mobile")
+      .eq("mobile", mobile)
+      .single();
 
-      if (existingMobile) {
-        return res.json({
-          success: false,
-          message: "Mobile already registered",
-        });
-      }
+    if (existingMobile) {
+      return res.json({
+        success: false,
+        message: "Mobile already registered",
+      });
     }
 
-    // insert
     const { error } = await supabase.from("users").insert([
       {
         id: crypto.randomUUID(),
         name,
-        email,
+        email: normalizedEmail,
         password: hashedPassword,
         mobile,
-        role,
-        vehicle_type: role === "driver" ? vehicle_type : null,
-        vehicle_number: role === "driver" ? vehicle_number : null,
-        is_online: false,
-        last_online_at: null,
+        role: "user",
         is_verified: true,
       },
     ]);
@@ -174,12 +249,14 @@ router.post("/signup", async (req, res) => {
       });
     }
 
+    delete signupVerificationStore[normalizedEmail];
+
     return res.json({
       success: true,
       message: "Account created successfully",
     });
-
   } catch (err) {
+    console.log("SIGNUP ERROR:", err);
     return res.json({
       success: false,
       message: "Signup failed",
@@ -190,20 +267,13 @@ router.post("/signup", async (req, res) => {
 router.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
-  // 🔥 ADMIN LOGIN (FIXED)
-  if (email === "admin@gmail.com" && password === "admin123") {
-    return res.json({
-      success: true,
-      role: "admin",
-    });
-  }
+  const normalizedEmail = normalizeEmail(email);
 
   try {
-    // 🔍 find user
-    const { data: user, error } = await supabase
+    const { data: user } = await supabase
       .from("users")
       .select("*")
-      .eq("email", email)
+      .eq("email", normalizedEmail)
       .single();
 
     if (!user) {
@@ -213,7 +283,13 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    // 🔐 check password
+    if (!["user", "admin"].includes(user.role)) {
+      return res.json({
+        success: false,
+        message: "This account role is no longer supported",
+      });
+    }
+
     const isMatch = await bcrypt.compare(password, user.password);
 
     if (!isMatch) {
@@ -228,8 +304,8 @@ router.post("/login", async (req, res) => {
       role: user.role,
       user,
     });
-
   } catch (err) {
+    console.log("LOGIN ERROR:", err);
     return res.json({
       success: false,
       message: "Login failed",
@@ -237,159 +313,177 @@ router.post("/login", async (req, res) => {
   }
 });
 
-const generateOtp = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-};
-
-// Ride request routes have been moved to ./ride.js using only the users table.
-// Keep auth-related routes below.
-
-router.post("/forgot-password", async (req, res) => {
+router.post("/send-otp", async (req, res) => {
+  console.log("SEND OTP API HIT");
   const { email } = req.body;
+  const normalizedEmail = normalizeEmail(email);
 
-  if (!email) {
+  if (!normalizedEmail) {
     return res.json({ success: false, message: "Email required" });
   }
 
+  if (!isValidEmail(normalizedEmail)) {
+    return res.json({ success: false, message: "Enter a valid email address" });
+  }
+
+  const { data: existingEmail, error: existingEmailError } = await supabase
+    .from("users")
+    .select("email")
+    .eq("email", normalizedEmail)
+    .maybeSingle();
+
+  if (existingEmailError) {
+    console.log("CHECK EMAIL ERROR:", existingEmailError);
+    return res.json({ success: false, message: "Unable to process email right now" });
+  }
+
+  if (existingEmail) {
+    return res.json({ success: false, message: "Email already registered" });
+  }
+
+  const otp = generateOtp();
+
+  otpStore[normalizedEmail] = {
+    otp,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+    purpose: "signup",
+  };
+
   try {
-    // check user exists in supabase
+    await transporter.sendMail({
+      from: `"PRide" <${process.env.EMAIL_USER}>`,
+      to: normalizedEmail,
+      subject: "PRide OTP Verification",
+      html: `<h2>Your OTP is: ${otp}</h2><p>Valid for 5 minutes</p>`,
+    });
+
+    return res.json({ success: true, message: "OTP sent" });
+  } catch (err) {
+    console.log("EMAIL ERROR:", err);
+    return res.json({ success: false, message: "Email send failed" });
+  }
+});
+
+router.post("/verify-signup", async (req, res) => {
+  const { email, otp } = req.body;
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedOtp = String(otp || "").trim();
+
+  const record = otpStore[normalizedEmail];
+
+  if (!record) {
+    return res.json({ success: false, message: "OTP not found" });
+  }
+
+  if (Date.now() > record.expiresAt) {
+    delete otpStore[normalizedEmail];
+    return res.json({ success: false, message: "OTP expired" });
+  }
+
+  if (record.purpose !== "signup") {
+    return res.json({ success: false, message: "Invalid OTP request" });
+  }
+
+  if (record.otp !== normalizedOtp) {
+    return res.json({ success: false, message: "Invalid OTP" });
+  }
+
+  delete otpStore[normalizedEmail];
+  signupVerificationStore[normalizedEmail] = {
+    verified: true,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  };
+
+  return res.json({
+    success: true,
+    message: "Email verified successfully",
+  });
+});
+
+router.post("/forgot-password", async (req, res) => {
+  const { email } = req.body;
+  const normalizedEmail = normalizeEmail(email);
+
+  if (!normalizedEmail) {
+    return res.json({ success: false, message: "Email required" });
+  }
+
+  if (!isValidEmail(normalizedEmail)) {
+    return res.json({ success: false, message: "Enter a valid email address" });
+  }
+
+  try {
     const { data: user, error } = await supabase
       .from("users")
       .select("*")
-      .eq("email", email)
+      .eq("email", normalizedEmail)
       .single();
 
     if (error || !user) {
       return res.json({ success: false, message: "User not found" });
     }
 
-    // generate OTP
     const otp = generateOtp();
 
-    otpStore[email] = {
+    otpStore[normalizedEmail] = {
       otp,
-      expiresAt: Date.now() + 5 * 60 * 1000, // 5 min
+      expiresAt: Date.now() + 5 * 60 * 1000,
+      purpose: "forgot-password",
     };
 
-    // send email
     await transporter.sendMail({
       from: `"PRide" <${process.env.EMAIL_USER}>`,
-      to: email,
+      to: normalizedEmail,
       subject: "Reset Password OTP",
       html: `<h2>Your OTP is: ${otp}</h2><p>Valid for 5 minutes</p>`,
     });
 
-    res.json({ success: true, message: "OTP sent to email" });
-
-  } catch (err) {
-    console.log(err);
-    res.json({ success: false, message: "Server error" });
-  }
-});
-
-router.post("/reset-password", async (req, res) => {
-  const { email, otp, newPassword } = req.body;
-
-  try {
-    const record = otpStore[email];
-
-    if (!record) {
-      return res.json({ success: false, message: "OTP not found" });
-    }
-
-    if (record.otp !== otp) {
-      return res.json({ success: false, message: "Invalid OTP" });
-    }
-
-    if (Date.now() > record.expiresAt) {
-      return res.json({ success: false, message: "OTP expired" });
-    }
-
-    // update password in supabase
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-    const { error } = await supabase
-      .from("users")
-      .update({ password: hashedPassword })
-      .eq("email", email);
-
-    if (error) {
-      return res.json({ success: false, message: "Update failed" });
-    }
-
-    // remove OTP
-    delete otpStore[email];
-
-    res.json({ success: true, message: "Password updated successfully" });
-
-  } catch (err) {
-    console.log(err);
-    res.json({ success: false, message: "Server error" });
-  }
-});
-
-router.get("/profile", async (req, res) => {
-  const { email, role } = req.query;
-
-  if (!email) {
-    return res.json({ success: false, message: "Email required" });
-  }
-
-  try {
-    let query = supabase
-      .from("users")
-      .select("id,name,email,mobile,role,vehicle_type,vehicle_number,is_online,is_verified")
-      .eq("email", email);
-
-    if (role) {
-      query = query.eq("role", role);
-    }
-
-    const { data: user, error } = await query.single();
-
-    if (error || !user) {
-      return res.json({ success: false, message: "User not found" });
-    }
-
-    return res.json({ success: true, user });
+    return res.json({ success: true, message: "OTP sent to email" });
   } catch (err) {
     console.log(err);
     return res.json({ success: false, message: "Server error" });
   }
 });
 
-router.post("/driver-status", async (req, res) => {
-  const { email, is_online } = req.body;
+router.post("/reset-password", async (req, res) => {
+  const { email, otp, newPassword } = req.body;
 
-  if (!email || typeof is_online !== "boolean") {
-    return res.json({ success: false, message: "Email and online status are required" });
-  }
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedOtp = String(otp || "").trim();
 
   try {
-    const { data: driver, error: driverError } = await supabase
-      .from("users")
-      .select("id,role")
-      .eq("email", email)
-      .single();
+    const record = otpStore[normalizedEmail];
 
-    if (driverError || !driver || driver.role !== "driver") {
-      return res.json({ success: false, message: "Driver not found" });
+    if (!record) {
+      return res.json({ success: false, message: "OTP not found" });
     }
 
-    const updateData = { is_online };
-    if (is_online) {
-      updateData.last_online_at = new Date().toISOString();
+    if (record.purpose !== "forgot-password") {
+      return res.json({ success: false, message: "Invalid OTP request" });
     }
 
+    if (record.otp !== normalizedOtp) {
+      return res.json({ success: false, message: "Invalid OTP" });
+    }
+
+    if (Date.now() > record.expiresAt) {
+      delete otpStore[normalizedEmail];
+      return res.json({ success: false, message: "OTP expired" });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
     const { error } = await supabase
       .from("users")
-      .update(updateData)
-      .eq("email", email);
+      .update({ password: hashedPassword })
+      .eq("email", normalizedEmail);
 
     if (error) {
-      return res.json({ success: false, message: "Unable to update driver status" });
+      return res.json({ success: false, message: "Update failed" });
     }
 
-    return res.json({ success: true, message: "Driver status updated", is_online });
+    delete otpStore[normalizedEmail];
+
+    return res.json({ success: true, message: "Password updated successfully" });
   } catch (err) {
     console.log(err);
     return res.json({ success: false, message: "Server error" });
